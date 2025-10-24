@@ -1,24 +1,11 @@
 import re
 import easyocr
+import os
+import pandas as pd
+from datetime import datetime
 
-def extract_phone_numbers_easy(image_path):
-    """
-    Extract phone numbers from an image using EasyOCR.
-    
-    Args:
-        image_path: Path to the image file
-        
-    Returns:
-        list: List of unique phone numbers found
-    """
-    # Initialize EasyOCR reader
-    # ['en', 'ar'] for English and Arabic
-    # gpu=True for faster processing (if you have CUDA-enabled GPU)
-    print("Initializing EasyOCR...")
-    reader = easyocr.Reader(['en', 'ar'], gpu=False)
-    
+def extract_phone_numbers_easy(image_path, reader):
     # Perform OCR
-    print("Processing image...")
     result = reader.readtext(image_path)
     
     # Extract all text
@@ -29,8 +16,6 @@ def extract_phone_numbers_easy(image_path):
     
     # Combine all text
     full_text = ' '.join(all_text)
-    
-    print(f"Extracted text: {full_text[:200]}...")  # Show first 200 chars
     
     # Pattern to match phone numbers
     phone_patterns = [
@@ -64,122 +49,174 @@ def extract_phone_numbers_easy(image_path):
     return list(set(cleaned_numbers))
 
 
-def extract_and_save_easy(image_path, output_file='phone_numbers.txt'):
-    """
-    Extract phone numbers using EasyOCR and save to file.
+def process_all_images(source_dir='source_image', output_excel='phone_numbers.xlsx'):
+    # Check if directory exists
+    if not os.path.exists(source_dir):
+        print(f"Error: Directory '{source_dir}' not found!")
+        print(f"Please create the directory and add your images.")
+        return
     
-    Args:
-        image_path: Path to the image file
-        output_file: Path to output text file
-    """
-    phone_numbers = extract_phone_numbers_easy(image_path)
+    # Get all image files
+    image_extensions = ['.png', '.jpg', '.jpeg', '.bmp', '.tiff']
+    image_files = [f for f in os.listdir(source_dir) 
+                    if os.path.splitext(f.lower())[1] in image_extensions]
     
-    # Print to console
-    print(f"\nFound {len(phone_numbers)} unique phone numbers:")
-    for number in sorted(phone_numbers):
-        print(number)
+    if not image_files:
+        print(f"No images found in '{source_dir}' directory!")
+        return
     
-    # Save to file
-    with open(output_file, 'w', encoding='utf-8') as f:
-        for number in sorted(phone_numbers):
-            f.write(number + '\n')
+    print(f"Found {len(image_files)} images to process")
+    print("Initializing EasyOCR (this may take a moment)...")
     
-    print(f"\nPhone numbers saved to {output_file}")
-    return phone_numbers
-
-
-def extract_with_details(image_path):
-    """
-    Extract phone numbers and show OCR details for debugging.
-    """
-    print("Initializing EasyOCR...")
+    # Initialize EasyOCR reader once
     reader = easyocr.Reader(['en', 'ar'], gpu=False)
     
-    print("Processing image...")
-    result = reader.readtext(image_path)
+    # Store all results
+    all_data = []
     
-    print("\nOCR Results:")
+    print("\nProcessing images...")
     print("-" * 70)
     
-    for idx, detection in enumerate(result):
-        bbox = detection[0]  # Bounding box coordinates
-        text = detection[1]   # Detected text
-        confidence = detection[2]  # Confidence score
-        print(f"{idx+1}. Text: {text:30} | Confidence: {confidence:.3f}")
+    for idx, image_file in enumerate(image_files, 1):
+        image_path = os.path.join(source_dir, image_file)
+        print(f"{idx}/{len(image_files)} Processing: {image_file}")
+        
+        try:
+            phone_numbers = extract_phone_numbers_easy(image_path, reader)
+            
+            if phone_numbers:
+                print(f"  ✓ Found {len(phone_numbers)} phone numbers")
+                for number in phone_numbers:
+                    all_data.append({
+                        'Image_Name': image_file,
+                        'Phone_Number': number
+                    })
+            else:
+                print(f"  ⚠ No phone numbers found")
+                all_data.append({
+                    'Image_Name': image_file,
+                    'Phone_Number': 'No numbers found'
+                })
+        except Exception as e:
+            print(f"  ✗ Error processing image: {str(e)}")
+            all_data.append({
+                'Image_Name': image_file,
+                'Phone_Number': f'Error: {str(e)}'
+            })
     
     print("-" * 70)
     
-    phone_numbers = extract_phone_numbers_easy(image_path)
-    print(f"\nExtracted phone numbers: {phone_numbers}")
+    # Create DataFrame
+    df = pd.DataFrame(all_data)
     
-    return phone_numbers
+    # Save to Excel
+    df.to_excel(output_excel, index=False, engine='openpyxl')
+    
+    # Print summary
+    total_numbers = len([d for d in all_data if d['Phone_Number'].startswith('+')])
+    print(f"\n✓ Processing complete!")
+    print(f"  Total images processed: {len(image_files)}")
+    print(f"  Total phone numbers found: {total_numbers}")
+    print(f"  Results saved to: {output_excel}")
+    
+    return df
 
 
-def batch_extract(image_paths):
+def create_summary_excel(source_dir='source_image', output_excel='phone_numbers_summary.xlsx'):
     """
-    Extract phone numbers from multiple images.
+    Create Excel with both detailed and summary sheets.
     
     Args:
-        image_paths: List of image file paths
-        
-    Returns:
-        dict: Dictionary mapping image paths to extracted phone numbers
+        source_dir: Directory containing images
+        output_excel: Output Excel file name
     """
-    # Initialize reader once for all images
+    # Check if directory exists
+    if not os.path.exists(source_dir):
+        print(f"Error: Directory '{source_dir}' not found!")
+        return
+    
+    # Get all image files
+    image_extensions = ['.png', '.jpg', '.jpeg', '.bmp', '.tiff']
+    image_files = [f for f in os.listdir(source_dir) 
+                    if os.path.splitext(f.lower())[1] in image_extensions]
+    
+    if not image_files:
+        print(f"No images found in '{source_dir}' directory!")
+        return
+    
+    print(f"Found {len(image_files)} images to process")
     print("Initializing EasyOCR...")
+    
     reader = easyocr.Reader(['en', 'ar'], gpu=False)
     
-    results = {}
+    detailed_data = []
+    summary_data = []
     
-    for image_path in image_paths:
-        print(f"\nProcessing {image_path}...")
-        result = reader.readtext(image_path)
-        
-        all_text = ' '.join([detection[1] for detection in result])
-        
-        phone_patterns = [
-            r'\+966\s*\d{1,2}\s*\d{3}\s*\d{4}',
-            r'\+966\d{9}',
-            r'966\s*\d{1,2}\s*\d{3}\s*\d{4}',
-            r'05\d{8}',
-        ]
-        
-        phone_numbers = []
-        for pattern in phone_patterns:
-            matches = re.findall(pattern, all_text)
-            phone_numbers.extend(matches)
-        
-        cleaned_numbers = []
-        for number in phone_numbers:
-            cleaned = number.replace(' ', '')
-            if not cleaned.startswith('+'):
-                if cleaned.startswith('966'):
-                    cleaned = '+' + cleaned
-                elif cleaned.startswith('05'):
-                    cleaned = '+966' + cleaned[1:]
-            cleaned_numbers.append(cleaned)
-        
-        results[image_path] = list(set(cleaned_numbers))
-        print(f"Found {len(results[image_path])} phone numbers")
+    print("\nProcessing images...")
+    print("-" * 70)
     
-    return results
+    for idx, image_file in enumerate(image_files, 1):
+        image_path = os.path.join(source_dir, image_file)
+        print(f"{idx}/{len(image_files)} Processing: {image_file}")
+        
+        try:
+            phone_numbers = extract_phone_numbers_easy(image_path, reader)
+            
+            if phone_numbers:
+                print(f"  ✓ Found {len(phone_numbers)} phone numbers")
+                for number in phone_numbers:
+                    detailed_data.append({
+                        'Image_Name': image_file,
+                        'Phone_Number': number
+                    })
+                
+                summary_data.append({
+                    'Image_Name': image_file,
+                    'Numbers_Found': len(phone_numbers),
+                    'Status': 'Success'
+                })
+            else:
+                print(f"  ⚠ No phone numbers found")
+                summary_data.append({
+                    'Image_Name': image_file,
+                    'Numbers_Found': 0,
+                    'Status': 'No numbers found'
+                })
+        except Exception as e:
+            print(f"  ✗ Error: {str(e)}")
+            summary_data.append({
+                'Image_Name': image_file,
+                'Numbers_Found': 0,
+                'Status': f'Error: {str(e)}'
+            })
+    
+    print("-" * 70)
+    
+    # Create Excel with multiple sheets
+    with pd.ExcelWriter(output_excel, engine='openpyxl') as writer:
+        # Detailed sheet
+        df_detailed = pd.DataFrame(detailed_data)
+        df_detailed.to_excel(writer, sheet_name='All Phone Numbers', index=False)
+        
+        # Summary sheet
+        df_summary = pd.DataFrame(summary_data)
+        df_summary.to_excel(writer, sheet_name='Summary', index=False)
+        
+        # Unique numbers sheet
+        if detailed_data:
+            unique_numbers = list(set([d['Phone_Number'] for d in detailed_data]))
+            df_unique = pd.DataFrame({'Unique_Phone_Numbers': sorted(unique_numbers)})
+            df_unique.to_excel(writer, sheet_name='Unique Numbers', index=False)
+    
+    # Print summary
+    total_numbers = len(detailed_data)
+    unique_count = len(set([d['Phone_Number'] for d in detailed_data])) if detailed_data else 0
+    
+    print(f"\n✓ Processing complete!")
+    print(f"  Total images processed: {len(image_files)}")
+    print(f"  Total phone numbers found: {total_numbers}")
+    print(f"  Unique phone numbers: {unique_count}")
+    print(f"  Results saved to: {output_excel}")
 
-
-# Example usage
 if __name__ == "__main__":
-    # Replace with your image path
-    image_path = "1.png"
-    
-    # Method 1: Simple extraction
-    numbers = extract_phone_numbers_easy(image_path)
-    print(numbers)
-    
-    # Method 2: Extract and save
-    # numbers = extract_and_save_easy(image_path)
-    
-    # Method 3: With debugging details
-    # numbers = extract_with_details(image_path)
-    
-    # Method 4: Batch processing multiple images
-    # image_list = ["image1.png", "image2.png", "image3.png"]
-    # all_numbers = batch_extract(image_list)
+    create_summary_excel('source_image', 'phone_numbers_complete.xlsx')
