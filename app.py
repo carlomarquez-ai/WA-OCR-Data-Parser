@@ -3,20 +3,48 @@ import easyocr
 import os
 import pandas as pd
 from datetime import datetime
+import json
 
+# ===== Load Settings =====
+try:
+    import setting
+    SETTINGS = {
+        'SOURCE_DIR': getattr(setting, 'SOURCE_DIR', 'source_image'),
+        'OUTPUT_EXCEL': getattr(setting, 'OUTPUT_EXCEL', 'result.xlsx'),
+        'LANGUAGES': getattr(setting, 'LANGUAGES', ['en', 'ar']),
+        'USE_GPU': getattr(setting, 'USE_GPU', False)
+    }
+except ModuleNotFoundError:
+    SETTINGS = {
+        'SOURCE_DIR': 'source_image',
+        'OUTPUT_EXCEL': 'result.xlsx',
+        'LANGUAGES': ['en', 'ar'],
+        'USE_GPU': False
+    }
+
+# ===== Save current settings to setting.py =====
+def save_settings():
+    content = f"""# Auto-generated settings
+
+SOURCE_DIR = '{SETTINGS['SOURCE_DIR']}'
+OUTPUT_EXCEL = '{SETTINGS['OUTPUT_EXCEL']}'
+LANGUAGES = {SETTINGS['LANGUAGES']}
+USE_GPU = {SETTINGS['USE_GPU']}
+"""
+    with open('setting.py', 'w', encoding='utf-8') as f:
+        f.write(content)
+
+save_settings()
+
+# ===== OCR & Extraction =====
 def extract_info_from_image(image_path, reader):
-    # Perform OCR
     result = reader.readtext(image_path)
     
-    # Extract all text with positions
     all_detections = []
     all_text = []
     
     for detection in result:
-        bbox = detection[0]
-        text = detection[1]
-        confidence = detection[2]
-        
+        bbox, text, confidence = detection
         all_detections.append({
             'text': text,
             'confidence': confidence,
@@ -24,26 +52,20 @@ def extract_info_from_image(image_path, reader):
         })
         all_text.append(text)
     
-    # Sort by Y position (top to bottom)
     all_detections.sort(key=lambda x: x['y_position'])
-    
-    # Combine all text
     full_text = ' '.join(all_text)
     
-    # Extract phone numbers
+    # Phone number extraction
     phone_patterns = [
-        r'\+966\s*\d{1,2}\s*\d{3}\s*\d{4}',  # +966 XX XXX XXXX
-        r'\+966\d{9}',                        # +966XXXXXXXXX
-        r'966\s*\d{1,2}\s*\d{3}\s*\d{4}',    # 966 XX XXX XXXX
-        r'05\d{8}',                           # 05XXXXXXXX
+        r'\+966\s*\d{1,2}\s*\d{3}\s*\d{4}',
+        r'\+966\d{9}',
+        r'966\s*\d{1,2}\s*\d{3}\s*\d{4}',
+        r'05\d{8}',
     ]
-    
     phone_numbers = []
     for pattern in phone_patterns:
-        matches = re.findall(pattern, full_text)
-        phone_numbers.extend(matches)
+        phone_numbers.extend(re.findall(pattern, full_text))
     
-    # Clean up phone numbers
     cleaned_numbers = []
     for number in phone_numbers:
         cleaned = number.replace(' ', '')
@@ -56,7 +78,7 @@ def extract_info_from_image(image_path, reader):
     
     phone_numbers = list(set(cleaned_numbers))
     
-    # Extract timestamps (day names, time patterns)
+    # Timestamp extraction
     day_pattern = r'Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|الأحد|الإثنين|الثلاثاء|الأربعاء|الخميس|الجمعة|السبت'
     time_pattern = r'\d{1,2}:\d{2}'
     arabic_time_pattern = r'اخر \d+ ساعه'
@@ -65,7 +87,6 @@ def extract_info_from_image(image_path, reader):
     time_match = re.search(time_pattern, full_text)
     arabic_time_match = re.search(arabic_time_pattern, full_text)
     
-    # Combine day and time
     timestamp = ''
     if day_match and time_match:
         timestamp = f"{day_match.group()} {time_match.group()}"
@@ -76,54 +97,28 @@ def extract_info_from_image(image_path, reader):
     elif arabic_time_match:
         timestamp = arabic_time_match.group()
     
-    # Extract potential names from top banner only (first 10-15% of image)
-    # Get image height to determine top banner area
+    # Potential names (top banner)
+    potential_names = []
     if all_detections:
         max_y = max(det['y_position'] for det in all_detections)
-        top_banner_threshold = max_y * 0.15  # Top 15% of image
-        
-        potential_names = []
-        
+        top_banner_threshold = max_y * 0.15
         for det in all_detections:
-            # Only check text in top banner area
             if det['y_position'] > top_banner_threshold:
                 continue
-                
             text = det['text'].strip()
-            
-            # Skip if it's a phone number
             if any(re.search(pattern, text) for pattern in phone_patterns):
                 continue
-            
-            # Skip timestamps
-            if re.search(r'Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday', text):
+            if re.search(day_pattern, text):
                 continue
-            if re.search(r'\d{1,2}:\d{2}', text):
-                continue
-            if re.search(r'الأحد|الإثنين|الثلاثاء|الأربعاء|الخميس|الجمعة|السبت', text):
-                continue
-            
-            # Skip very short text and common UI elements
             if len(text) <= 2:
                 continue
             if text.lower() in ['edit', 'back', 'search']:
                 continue
-            
-            # Add as potential name
             potential_names.append(text)
-    else:
-        potential_names = []
     
-    # Extract messages (Arabic text that looks like messages)
-    messages = []
-    message_pattern = r'الله محييكم كلمتنا وعندك اهتمام اذا و'
-    if re.search(message_pattern, full_text):
-        messages.append(message_pattern)
-    
-    # Get all Arabic text (likely messages)
+    # Arabic messages
     arabic_pattern = r'[\u0600-\u06FF\s]+'
-    arabic_texts = re.findall(arabic_pattern, full_text)
-    arabic_texts = [text.strip() for text in arabic_texts if len(text.strip()) > 5]
+    arabic_texts = [t.strip() for t in re.findall(arabic_pattern, full_text) if len(t.strip()) > 5]
     
     return {
         'phone_numbers': phone_numbers,
@@ -134,19 +129,17 @@ def extract_info_from_image(image_path, reader):
         'total_text_blocks': len(all_detections)
     }
 
-
-def process_all_images(source_dir='source_image', output_excel='result.xlsx'):
+# ===== Main Processing =====
+def process_all_images():
+    source_dir = SETTINGS['SOURCE_DIR']
+    output_excel = SETTINGS['OUTPUT_EXCEL']
     
-    # Check if directory exists
     if not os.path.exists(source_dir):
         print(f"Error: Directory '{source_dir}' not found!")
-        print(f"Please create the directory and add your images.")
         return
     
-    # Get all image files
     image_extensions = ['.png', '.jpg', '.jpeg', '.bmp', '.tiff']
-    image_files = [f for f in os.listdir(source_dir) 
-                    if os.path.splitext(f.lower())[1] in image_extensions]
+    image_files = [f for f in os.listdir(source_dir) if os.path.splitext(f.lower())[1] in image_extensions]
     
     if not image_files:
         print(f"No images found in '{source_dir}' directory!")
@@ -155,38 +148,26 @@ def process_all_images(source_dir='source_image', output_excel='result.xlsx'):
     print(f"Found {len(image_files)} images to process")
     print("Initializing EasyOCR (this may take a moment)...")
     
-    # Initialize EasyOCR reader once
-    reader = easyocr.Reader(['en', 'ar'], gpu=False)
+    reader = easyocr.Reader(SETTINGS['LANGUAGES'], gpu=SETTINGS['USE_GPU'])
     
-    # Store results for different sheets
-    phone_data = []
-    summary_data = []
-    all_text_data = []
-    
-    print("\nProcessing images...")
-    print("-" * 70)
+    phone_data, summary_data, all_text_data = [], [], []
     
     for idx, image_file in enumerate(image_files, 1):
         image_path = os.path.join(source_dir, image_file)
         print(f"{idx}/{len(image_files)} Processing: {image_file}")
-        
         try:
             info = extract_info_from_image(image_path, reader)
             
-            # Add to phone numbers sheet
-            if info['phone_numbers']:
-                print(f"  ✓ Found {len(info['phone_numbers'])} phone numbers")
-                for phone in info['phone_numbers']:
-                    phone_data.append({
-                        'Image_Name': image_file,
-                        'Phone_Number': phone,
-                        'Name': ', '.join(info['names']) if info['names'] else '',
-                        'Timestamp': info['timestamp']
-                    })
-            else:
-                print(f"  ⚠ No phone numbers found")
+            # Phone sheet
+            for phone in info['phone_numbers']:
+                phone_data.append({
+                    'Image_Name': image_file,
+                    'Phone_Number': phone,
+                    'Name': ', '.join(info['names']) if info['names'] else '',
+                    'Timestamp': info['timestamp']
+                })
             
-            # Add to summary sheet
+            # Summary
             summary_data.append({
                 'Image_Name': image_file,
                 'Phone_Numbers_Count': len(info['phone_numbers']),
@@ -195,7 +176,7 @@ def process_all_images(source_dir='source_image', output_excel='result.xlsx'):
                 'Text_Blocks_Count': info['total_text_blocks']
             })
             
-            # Add to all text sheet
+            # All text
             all_text_data.append({
                 'Image_Name': image_file,
                 'All_Extracted_Text': info['all_text'],
@@ -203,51 +184,31 @@ def process_all_images(source_dir='source_image', output_excel='result.xlsx'):
             })
             
         except Exception as e:
-            print(f"  ✗ Error: {str(e)}")
+            print(f"  ✗ Error: {e}")
             summary_data.append({
                 'Image_Name': image_file,
                 'Phone_Numbers_Count': 0,
-                'Names_Detected': f'Error: {str(e)}',
+                'Names_Detected': f'Error: {e}',
                 'Timestamp': 'Error',
                 'Text_Blocks_Count': 0
             })
     
-    print("-" * 70)
-    
-    # Create Excel with multiple sheets
     with pd.ExcelWriter(output_excel, engine='openpyxl') as writer:
-        # Phone numbers with context
         if phone_data:
-            df_phones = pd.DataFrame(phone_data)
-            df_phones.to_excel(writer, sheet_name='Phone Numbers', index=False)
-            
-            # Unique phone numbers
-            unique_phones = list(set([d['Phone_Number'] for d in phone_data]))
-            df_unique = pd.DataFrame({'Unique_Phone_Numbers': sorted(unique_phones)})
-            df_unique.to_excel(writer, sheet_name='Unique Numbers', index=False)
-        
-        # Summary
-        df_summary = pd.DataFrame(summary_data)
-        df_summary.to_excel(writer, sheet_name='Summary', index=False)
-        
-        # All extracted text
-        df_text = pd.DataFrame(all_text_data)
-        df_text.to_excel(writer, sheet_name='All Text', index=False)
+            pd.DataFrame(phone_data).to_excel(writer, sheet_name='Phone Numbers', index=False)
+            unique_phones = list(set(d['Phone_Number'] for d in phone_data))
+            pd.DataFrame({'Unique_Phone_Numbers': sorted(unique_phones)}).to_excel(writer, sheet_name='Unique Numbers', index=False)
+        pd.DataFrame(summary_data).to_excel(writer, sheet_name='Summary', index=False)
+        pd.DataFrame(all_text_data).to_excel(writer, sheet_name='All Text', index=False)
     
-    # Print summary
     total_numbers = len(phone_data)
-    unique_count = len(set([d['Phone_Number'] for d in phone_data])) if phone_data else 0
+    unique_count = len(set(d['Phone_Number'] for d in phone_data)) if phone_data else 0
     
     print(f"\n✓ Processing complete!")
     print(f"  Total images processed: {len(image_files)}")
     print(f"  Total phone numbers found: {total_numbers}")
     print(f"  Unique phone numbers: {unique_count}")
     print(f"  Results saved to: {output_excel}")
-    print(f"\nExcel sheets created:")
-    print(f"  1. Phone Numbers - Phone numbers with name and timestamp")
-    print(f"  2. Unique Numbers - Deduplicated phone numbers only")
-    print(f"  3. Summary - Overview of each image")
-    print(f"  4. All Text - Complete extracted text from each image")
 
 if __name__ == "__main__":
-    process_all_images('source_image', 'result.xlsx')
+    process_all_images()
