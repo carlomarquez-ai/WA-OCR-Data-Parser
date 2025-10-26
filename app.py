@@ -57,29 +57,62 @@ def extract_info_from_image(image_path, reader):
     phone_numbers = list(set(cleaned_numbers))
     
     # Extract timestamps (day names, time patterns)
-    timestamp_patterns = [
-        r'Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday',
-        r'\d{1,2}:\d{2}',
-        r'اخر \d+ ساعه',
-        r'الأحد|الإثنين|الثلاثاء|الأربعاء|الخميس|الجمعة|السبت'
-    ]
+    day_pattern = r'Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|الأحد|الإثنين|الثلاثاء|الأربعاء|الخميس|الجمعة|السبت'
+    time_pattern = r'\d{1,2}:\d{2}'
+    arabic_time_pattern = r'اخر \d+ ساعه'
     
-    timestamps = []
-    for pattern in timestamp_patterns:
-        matches = re.findall(pattern, full_text)
-        timestamps.extend(matches)
+    day_match = re.search(day_pattern, full_text)
+    time_match = re.search(time_pattern, full_text)
+    arabic_time_match = re.search(arabic_time_pattern, full_text)
     
-    # Extract message status (checkmarks)
-    has_checkmarks = '✓' in full_text or '✔' in full_text
+    # Combine day and time
+    timestamp = ''
+    if day_match and time_match:
+        timestamp = f"{day_match.group()} {time_match.group()}"
+    elif day_match:
+        timestamp = day_match.group()
+    elif time_match:
+        timestamp = time_match.group()
+    elif arabic_time_match:
+        timestamp = arabic_time_match.group()
     
-    # Extract potential names (text before phone numbers, usually in first few lines)
-    potential_names = []
-    for det in all_detections[:5]:
-        text = det['text']
-        if not any(re.search(pattern, text) for pattern in phone_patterns):
-            if text not in ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']:
-                if len(text) > 2:
-                    potential_names.append(text)
+    # Extract potential names from top banner only (first 10-15% of image)
+    # Get image height to determine top banner area
+    if all_detections:
+        max_y = max(det['y_position'] for det in all_detections)
+        top_banner_threshold = max_y * 0.15  # Top 15% of image
+        
+        potential_names = []
+        
+        for det in all_detections:
+            # Only check text in top banner area
+            if det['y_position'] > top_banner_threshold:
+                continue
+                
+            text = det['text'].strip()
+            
+            # Skip if it's a phone number
+            if any(re.search(pattern, text) for pattern in phone_patterns):
+                continue
+            
+            # Skip timestamps
+            if re.search(r'Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday', text):
+                continue
+            if re.search(r'\d{1,2}:\d{2}', text):
+                continue
+            if re.search(r'الأحد|الإثنين|الثلاثاء|الأربعاء|الخميس|الجمعة|السبت', text):
+                continue
+            
+            # Skip very short text and common UI elements
+            if len(text) <= 2:
+                continue
+            if text.lower() in ['edit', 'back', 'search']:
+                continue
+            
+            # Add as potential name
+            potential_names.append(text)
+    else:
+        potential_names = []
     
     # Extract messages (Arabic text that looks like messages)
     messages = []
@@ -95,15 +128,15 @@ def extract_info_from_image(image_path, reader):
     return {
         'phone_numbers': phone_numbers,
         'names': potential_names,
-        'timestamps': timestamps,
+        'timestamp': timestamp,
         'messages': arabic_texts,
-        'has_checkmarks': has_checkmarks,
         'all_text': full_text,
         'total_text_blocks': len(all_detections)
     }
 
 
-def process_all_images(source_dir='source_image', output_excel='phone_numbers_complete.xlsx'):
+def process_all_images(source_dir='source_image', output_excel='result.xlsx'):
+    
     # Check if directory exists
     if not os.path.exists(source_dir):
         print(f"Error: Directory '{source_dir}' not found!")
@@ -147,9 +180,8 @@ def process_all_images(source_dir='source_image', output_excel='phone_numbers_co
                     phone_data.append({
                         'Image_Name': image_file,
                         'Phone_Number': phone,
-                        'Possible_Name': ', '.join(info['names'][:2]) if info['names'] else '',
-                        'Timestamp': ', '.join(info['timestamps'][:2]) if info['timestamps'] else '',
-                        'Has_Checkmarks': 'Yes' if info['has_checkmarks'] else 'No'
+                        'Name': ', '.join(info['names']) if info['names'] else '',
+                        'Timestamp': info['timestamp']
                     })
             else:
                 print(f"  ⚠ No phone numbers found")
@@ -158,10 +190,9 @@ def process_all_images(source_dir='source_image', output_excel='phone_numbers_co
             summary_data.append({
                 'Image_Name': image_file,
                 'Phone_Numbers_Count': len(info['phone_numbers']),
-                'Names_Detected': ', '.join(info['names'][:3]) if info['names'] else 'None',
-                'Timestamps': ', '.join(info['timestamps']) if info['timestamps'] else 'None',
-                'Text_Blocks_Count': info['total_text_blocks'],
-                'Has_Checkmarks': 'Yes' if info['has_checkmarks'] else 'No'
+                'Names_Detected': ', '.join(info['names']) if info['names'] else 'None',
+                'Timestamp': info['timestamp'] if info['timestamp'] else 'None',
+                'Text_Blocks_Count': info['total_text_blocks']
             })
             
             # Add to all text sheet
@@ -177,9 +208,8 @@ def process_all_images(source_dir='source_image', output_excel='phone_numbers_co
                 'Image_Name': image_file,
                 'Phone_Numbers_Count': 0,
                 'Names_Detected': f'Error: {str(e)}',
-                'Timestamps': 'Error',
-                'Text_Blocks_Count': 0,
-                'Has_Checkmarks': 'Error'
+                'Timestamp': 'Error',
+                'Text_Blocks_Count': 0
             })
     
     print("-" * 70)
@@ -214,10 +244,10 @@ def process_all_images(source_dir='source_image', output_excel='phone_numbers_co
     print(f"  Unique phone numbers: {unique_count}")
     print(f"  Results saved to: {output_excel}")
     print(f"\nExcel sheets created:")
-    print(f"  1. Phone Numbers - Phone numbers with names, timestamps, status")
+    print(f"  1. Phone Numbers - Phone numbers with name and timestamp")
     print(f"  2. Unique Numbers - Deduplicated phone numbers only")
     print(f"  3. Summary - Overview of each image")
     print(f"  4. All Text - Complete extracted text from each image")
 
 if __name__ == "__main__":
-    process_all_images('source_image', 'phone_numbers_complete.xlsx')
+    process_all_images('source_image', 'result.xlsx')
